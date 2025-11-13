@@ -5,13 +5,29 @@ import base64
 import json
 from datetime import datetime
 import glob
+import zipfile
+import io
 
 app = Flask(__name__)
 
-# Directorio para guardar las imágenes
-UPLOAD_FOLDER = '/opt/render/project/src/drawings'  # Ruta persistente en Render
+# Directorio persistente
+UPLOAD_FOLDER = '/opt/render/project/src/drawings'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
+
+# Subcarpetas por símbolo
+SYMBOL_FOLDERS = {
+    "corchea": "corchea",
+    "semicorchea": "semicorchea",
+    "plica_abajo": "plica_abajo",
+    "plica_arriba": "plica_arriba",
+    "clave_sol": "clave_sol"
+}
+
+for folder in SYMBOL_FOLDERS.values():
+    path = os.path.join(UPLOAD_FOLDER, folder)
+    if not os.path.exists(path):
+        os.makedirs(path)
 
 main_html = """
 <!DOCTYPE html>
@@ -374,80 +390,93 @@ def index():
 def upload():
     try:
         img_data = request.form.get('myImage').replace("data:image/png;base64,", "")
-        mode = request.form.get('mode', 'color')
+        mode = request.form.get('mode', 'bw')
         color = request.form.get('color', '#000000')
+        symbol = request.form.get('symbol', 'unknown')  # ← NUEVO
+        
+        # Validar símbolo
+        folder_name = SYMBOL_FOLDERS.get(symbol, "otros")
+        symbol_folder = os.path.join(UPLOAD_FOLDER, folder_name)
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        filename = f'drawing_{timestamp}.png'
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        filename = f'{symbol}_{timestamp}.png'
+        filepath = os.path.join(symbol_folder, filename)
         
         with open(filepath, 'wb') as fh:
             fh.write(base64.b64decode(img_data))
         
         metadata = {
             'filename': filename,
+            'symbol': symbol,
             'mode': mode,
             'color': color,
             'timestamp': timestamp
         }
         
-        metadata_file = os.path.join(UPLOAD_FOLDER, f'meta_{timestamp}.json')
-        with open(metadata_file, 'w') as f:
+        meta_file = os.path.join(symbol_folder, f'meta_{timestamp}.json')
+        with open(meta_file, 'w') as f:
             json.dump(metadata, f)
         
-        print(f"✅ Image saved: {filename}")
-        return jsonify({'success': True, 'message': 'Image uploaded successfully'})
+        print(f"Image saved: {symbol}/{filename}")
+        return jsonify({'success': True})
     
     except Exception as err:
-        print(f"❌ Error: {err}")
+        print(f"Error: {err}")
         return jsonify({'success': False, 'error': str(err)}), 500
 
 @app.route('/count', methods=['GET'])
 def get_count():
     try:
-        png_files = glob.glob(os.path.join(UPLOAD_FOLDER, '*.png'))
-        count = len(png_files)
-        return jsonify({'count': count})
-    except Exception as err:
+        total = 0
+        for folder in SYMBOL_FOLDERS.values():
+            path = os.path.join(UPLOAD_FOLDER, folder)
+            total += len(glob.glob(os.path.join(path, '*.png')))
+        return jsonify({'count': total})
+    except:
         return jsonify({'count': 0})
 
 @app.route('/download_dataset', methods=['GET'])
 def download_dataset():
     try:
-        import zipfile
-        import io as io_module
-        
-        filelist = glob.glob(os.path.join(UPLOAD_FOLDER, '*.png'))
-        
-        if not filelist:
-            return "No hay imágenes para descargar", 404
-        
-        # Create ZIP in memory
-        memory_file = io_module.BytesIO()
+        memory_file = io.BytesIO()
         with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for file_path in filelist:
-                zf.write(file_path, os.path.basename(file_path))
+            for folder_name, folder_path in SYMBOL_FOLDERS.items():
+                full_path = os.path.join(UPLOAD_FOLDER, folder_path)
+                if not os.path.exists(full_path):
+                    continue
+                for file_path in glob.glob(os.path.join(full_path, '*.png')):
+                    arcname = f"{folder_path}/{os.path.basename(file_path)}"
+                    zf.write(file_path, arcname)
+                # Opcional: incluir metadata
+                for meta_path in glob.glob(os.path.join(full_path, 'meta_*.json')):
+                    arcname = f"{folder_path}/metadata/{os.path.basename(meta_path)}"
+                    os.makedirs(os.path.dirname(arcname), exist_ok=True)
+                    zf.write(meta_path, arcname)
         
         memory_file.seek(0)
-        
         return send_file(
             memory_file,
             mimetype='application/zip',
             as_attachment=True,
-            download_name=f'dataset_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip'
+            download_name=f'musical_dataset_{datetime.now().strftime("%Y%m%d_%H%M%S")}.zip'
         )
-    
     except Exception as err:
-        print(f"❌ Error preparing dataset: {err}")
         return f"Error: {str(err)}", 500
 
 @app.route('/clear_all', methods=['POST'])
 def clear_all():
     try:
-        files = glob.glob(os.path.join(UPLOAD_FOLDER, '*'))
-        for f in files:
-            os.remove(f)
-        return jsonify({'success': True, 'message': 'All drawings cleared'})
+        for folder in SYMBOL_FOLDERS.values():
+            path = os.path.join(UPLOAD_FOLDER, folder)
+            if os.path.exists(path):
+                for f in os.listdir(path):
+                    os.remove(os.path.join(path, f))
+                # Borrar metadata también
+                meta_dir = os.path.join(path, 'metadata')
+                if os.path.exists(meta_dir):
+                    for f in os.listdir(meta_dir):
+                        os.remove(os.path.join(meta_dir, f))
+        return jsonify({'success': True})
     except Exception as err:
         return jsonify({'success': False, 'error': str(err)}), 500
 
